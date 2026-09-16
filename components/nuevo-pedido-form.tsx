@@ -43,7 +43,7 @@ export function NuevoPedidoForm({
   const [estado, setEstado] = useState<EstadoHistorico>("VENDIDO");
   const [nota, setNota] = useState("");
 
-  const [confirmado, setConfirmado] = useState<{ lote: string; pedidoCodigo: string } | null>(null);
+  const [confirmado, setConfirmado] = useState<{ lote: string; pedidoCodigo: string; corteId: number } | null>(null);
 
   const referenciasDeLinea = [...new Set(opciones.filter((o) => o.linea === linea).map((o) => o.referencia))];
   const clienteElegido = clientes.find((c) => String(c.id) === clienteId) ?? null;
@@ -114,7 +114,11 @@ export function NuevoPedidoForm({
         setError(res.error);
         return;
       }
-      setConfirmado({ lote: res.lote, pedidoCodigo: res.pedidoCodigo });
+      // Se actualiza el plano localmente con lo que acaba de quedar guardado
+      // (incluye el corte nuevo) para mostrarlo de inmediato, sin depender
+      // de que el usuario recargue o navegue a la sección Rollos.
+      setPlanos((prev) => ({ ...prev, [res.lote]: res.plano }));
+      setConfirmado({ lote: res.lote, pedidoCodigo: res.pedidoCodigo, corteId: res.corteId });
       router.refresh();
     });
   }
@@ -324,9 +328,25 @@ export function NuevoPedidoForm({
       )}
 
       {confirmado && (
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-5 text-sm text-emerald-800">
-          Corte del pedido <strong>{confirmado.pedidoCodigo}</strong> registrado sobre el lote{" "}
-          <strong>{confirmado.lote}</strong>. Ya quedó en el historial e inventario actualizado.
+        <div className="space-y-4">
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-5 text-sm text-emerald-800">
+            Corte del pedido <strong>{confirmado.pedidoCodigo}</strong> registrado sobre el lote{" "}
+            <strong>{confirmado.lote}</strong>. Ya quedó en el historial e inventario actualizado.
+          </div>
+          {planos[confirmado.lote] && (
+            <div>
+              <p className="mb-2 text-xs font-medium uppercase tracking-wide text-brand-700">
+                Plano de corte actualizado — el corte recién hecho aparece en verde
+              </p>
+              <PlanoDeCorte
+                anchoRollo={planos[confirmado.lote].anchoMm}
+                largoRollo={planos[confirmado.lote].largoMm}
+                largoUsado={planos[confirmado.lote].largoUsadoMm}
+                cortes={planos[confirmado.lote].cortes}
+                corteNuevoId={confirmado.corteId}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>

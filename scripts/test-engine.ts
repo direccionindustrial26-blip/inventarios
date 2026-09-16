@@ -7,7 +7,7 @@ import "./env";
 import { db } from "../lib/db";
 import { rollos, cortes, retales } from "../lib/db/schema";
 import { eq } from "drizzle-orm";
-import { sugerirCorte, reconstruirFranjas } from "../lib/cutting-engine";
+import { sugerirCorte, construirSkyline } from "../lib/cutting-engine";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error("FALLÓ: " + msg);
@@ -67,12 +67,32 @@ async function main() {
   );
   assert(sugerencia3.tipo === "retal", "prioriza el retal disponible sobre abrir un rollo nuevo");
 
-  // Caso 4: reconstrucción de franjas no debe solapar piezas ya cortadas.
+  // Caso 4: el perfil de alturas (skyline) no debe salirse del ancho del rollo.
   const cortesRollo = cortesPorRollo.get(rollo!.lote) ?? [];
-  const franjas = reconstruirFranjas(cortesRollo);
-  for (const f of franjas) {
-    assert(f.anchoUsado <= rollo!.anchoMm + 1e-6, `franja en Y=${f.yInicial} no excede el ancho del rollo`);
+  const skyline = construirSkyline(cortesRollo, rollo!.anchoMm);
+  for (const s of skyline) {
+    assert(s.xFin <= rollo!.anchoMm + 1e-6, `tramo [${s.xIni}, ${s.xFin}] no excede el ancho del rollo`);
+    assert(s.xIni >= -1e-6, `tramo [${s.xIni}, ${s.xFin}] no empieza antes de X=0`);
   }
+
+  // Caso 5: un rollo con historial real "en 2D" (huecos no contiguos, como
+  // los importados de Planos Rollos.xlsx) debe seguir ofreciendo el espacio
+  // libre real, no solo lo que queda después de la frontera Y más lejana.
+  const cortesConHueco = [
+    { xInicial: 0, yInicial: 0, anchoMm: 140, largoMm: 20000 },
+    { xInicial: 300, yInicial: 0, anchoMm: 1700, largoMm: 2000 },
+  ];
+  const rolloConHueco = { id: 999, lote: "TEST-HUECO", linea: "PU", referencia: "TEST", anchoMm: 2000, largoMm: 20000, largoUsadoMm: 20000 };
+  const sugerenciaHueco = sugerirCorte(
+    { linea: "PU", referencia: "TEST", anchoMm: 100, largoMm: 500 },
+    [],
+    [rolloConHueco],
+    new Map([["TEST-HUECO", cortesConHueco]])
+  );
+  assert(
+    sugerenciaHueco.tipo === "rollo",
+    "encuentra el hueco lateral (x:140-300) aunque la frontera Y global ya esté al tope"
+  );
 
   console.log("\nTodas las pruebas pasaron.");
 }

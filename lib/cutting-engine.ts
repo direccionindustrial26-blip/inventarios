@@ -3,7 +3,7 @@
  *
  * Es un algoritmo determinista (no un modelo de lenguaje) — decidir en qué
  * coordenadas exactas cortar una pieza es un problema de optimización
- * combinatoria (2D cutting-stock / shelf packing), no una tarea de lenguaje.
+ * combinatoria (2D cutting-stock / skyline packing), no una tarea de lenguaje.
  * Un LLM puede fallar la aritmética de coordenadas; este algoritmo es
  * 100% verificable y reproducible, igual a como Diego ya lo hace a mano en
  * su "Plano de corte" — solo que aquí queda automatizado y con trazabilidad.
@@ -13,20 +13,30 @@
  * ancho del rollo. Si se confirma que sí se pueden rotar, `allowRotation`
  * habilita esa rama sin tocar el resto del motor.
  *
- * Estrategia de franjas (shelves), igual al "Plano de corte" existente:
- *   - Un rollo se corta en franjas apiladas a lo largo de Y (el largo).
- *   - Dentro de una franja, las piezas se acomodan una junto a otra a lo
- *     largo de X (el ancho), hasta agotar el ancho del rollo.
- *   - Al pedir una pieza nueva, primero se intenta encajar en una franja ya
- *     abierta (reutilizando ancho libre); si no cabe en ninguna, se abre una
- *     franja nueva al final del rollo.
+ * Estrategia — "skyline" (perfil de alturas), igual a como Diego arma el
+ * "Plano de corte" a mano: cada corte ya hecho "levanta" el perfil del rollo
+ * en el tramo de ancho (X) que ocupa, hasta la altura (Y) donde termina. El
+ * hueco libre para una pieza nueva es, en cualquier tramo de ancho, todo lo
+ * que queda por encima de ese perfil.
+ *
+ * Esto reemplaza una versión anterior que solo reconocía "franjas" agrupando
+ * cortes por su Y exacto y asumía que dentro de una franja las piezas se
+ * acomodan siempre contiguas desde X=0 — válido únicamente para cortes hechos
+ * por el propio motor, pero no para el historial real (importado de "Planos
+ * Rollos.xlsx"), donde Diego corta en cualquier X/Y libre, dejando huecos que
+ * esa versión no era capaz de reconocer como disponibles (reportaba "sin
+ * material" con el rollo lleno de huecos aprovechables). El perfil de alturas
+ * (skyline) sí reconstruye correctamente el espacio libre real sin importar
+ * el orden o la forma en que se hayan hecho los cortes.
  *
  * Prioridad de búsqueda (igual a como ya trabaja Diego: "primero validar
  * existencia de tramo"):
  *   1. Retales disponibles que alcancen la medida (best-fit: el que deja
  *      menor desperdicio).
  *   2. Si no hay retal, un rollo activo de la misma línea/referencia con
- *      ancho suficiente, usando el algoritmo de franjas.
+ *      espacio libre suficiente en su perfil de alturas — se prefiere la
+ *      posición más baja (menos avance de Y) y, entre varias a la misma
+ *      altura, la que deje menos ancho sobrante.
  */
 
 export type PiezaRequerida = {
@@ -55,60 +65,125 @@ export type RolloActivo = {
   largoUsadoMm: number;
 };
 
-/** Una franja (shelf) reconstruida a partir de los cortes ya hechos en un rollo. */
-export type Franja = {
-  yInicial: number;
-  altoFranja: number; // = largo de la pieza más larga colocada en la franja
-  anchoUsado: number; // acumulado de ancho ya consumido en esta franja
+/**
+ * Un tramo del perfil de alturas (skyline) del rollo: en el rango de ancho
+ * [xIni, xFin) ya hay material cortado (o reservado) hasta la altura yTope;
+ * por encima de yTope, ese tramo de ancho está libre.
+ */
+export type SegmentoSkyline = {
+  xIni: number;
+  xFin: number;
+  yTope: number;
 };
-
-export type SugerenciaCorte =
-  | {
-      tipo: "retal";
-      retalId: number;
-      loteOrigen: string;
-      xInicial: 0;
-      yInicial: 0;
-      anchoMm: number;
-      largoMm: number;
-      sobranteAnchoMm: number;
-      sobranteLargoMm: number;
-    }
-  | {
-      tipo: "rollo";
-      rolloId: number;
-      lote: string;
-      xInicial: number;
-      yInicial: number;
-      anchoMm: number;
-      largoMm: number;
-      abreFranjaNueva: boolean;
-    }
-  | { tipo: "sin_material" };
 
 const EPS = 1e-6;
 
-/** Reconstruye las franjas ya abiertas de un rollo a partir de sus cortes. */
-export function reconstruirFranjas(
-  cortesDelRollo: { xInicial: number; yInicial: number; anchoMm: number; largoMm: number }[]
-): Franja[] {
-  const porY = new Map<number, Franja>();
+/**
+ * Reconstruye el perfil de alturas (skyline) de un rollo a partir de TODOS
+ * sus cortes ya registrados (vendidos, retal útil o eliminados — cualquiera
+ * que físicamente ya haya consumido ese espacio). No asume ningún orden ni
+ * alineación entre cortes: funciona igual con datos históricos importados
+ * (2D libre) que con cortes hechos por este motor (franjas prolijas).
+ */
+export function construirSkyline(
+  cortesDelRollo: { xInicial: number; yInicial: number; anchoMm: number; largoMm: number }[],
+  anchoRollo: number
+): SegmentoSkyline[] {
+  if (anchoRollo <= 0) return [];
+  if (cortesDelRollo.length === 0) return [{ xIni: 0, xFin: anchoRollo, yTope: 0 }];
+
+  const bordes = new Set<number>([0, anchoRollo]);
   for (const c of cortesDelRollo) {
-    const key = c.yInicial;
-    const existente = porY.get(key);
-    const finAncho = c.xInicial + c.anchoMm;
-    if (existente) {
-      existente.anchoUsado = Math.max(existente.anchoUsado, finAncho);
-      existente.altoFranja = Math.max(existente.altoFranja, c.largoMm);
-    } else {
-      porY.set(key, {
-        yInicial: c.yInicial,
-        altoFranja: c.largoMm,
-        anchoUsado: finAncho,
-      });
+    const xIni = Math.max(0, Math.min(anchoRollo, c.xInicial));
+    const xFin = Math.max(0, Math.min(anchoRollo, c.xInicial + c.anchoMm));
+    bordes.add(xIni);
+    bordes.add(xFin);
+  }
+  const puntos = [...bordes].sort((a, b) => a - b);
+
+  const segmentos: SegmentoSkyline[] = [];
+  for (let i = 0; i < puntos.length - 1; i++) {
+    const xIni = puntos[i];
+    const xFin = puntos[i + 1];
+    if (xFin - xIni <= EPS) continue;
+    const xMedio = (xIni + xFin) / 2;
+    let yTope = 0;
+    for (const c of cortesDelRollo) {
+      if (c.xInicial - EPS <= xMedio && xMedio <= c.xInicial + c.anchoMm + EPS) {
+        yTope = Math.max(yTope, c.yInicial + c.largoMm);
+      }
+    }
+    segmentos.push({ xIni, xFin, yTope });
+  }
+  return segmentos;
+}
+
+/** Altura máxima ya ocupada dentro de un rango de ancho [xIni, xFin). */
+export function alturaEnRango(skyline: SegmentoSkyline[], xIni: number, xFin: number): number {
+  let maxY = 0;
+  for (const s of skyline) {
+    if (s.xFin > xIni + EPS && s.xIni < xFin - EPS) {
+      maxY = Math.max(maxY, s.yTope);
     }
   }
-  return [...porY.values()].sort((a, b) => a.yInicial - b.yInicial);
+  return maxY;
+}
+
+/**
+ * Ancho del tramo libre contiguo que empieza en `xIni` a la altura `yTope`
+ * (hasta dónde se puede correr hacia la derecha sin toparse con un tramo más
+ * alto) — se usa para calcular cuánto sobrante lateral queda tras un corte.
+ */
+export function anchoLibreContiguo(skyline: SegmentoSkyline[], xIni: number, yTope: number, anchoRollo: number): number {
+  let xFinLibre = xIni;
+  for (const s of [...skyline].sort((a, b) => a.xIni - b.xIni)) {
+    if (s.xFin <= xFinLibre + EPS) continue;
+    if (s.xIni > xFinLibre + EPS) break; // hueco no contiguo
+    if (s.yTope > yTope + EPS) break; // tramo más alto: no se puede seguir de largo
+    xFinLibre = s.xFin;
+  }
+  return Math.min(xFinLibre, anchoRollo) - xIni;
+}
+
+/**
+ * Ubica una pieza dentro de un rollo usando su perfil de alturas (skyline).
+ * Busca, entre todos los tramos de ancho posibles, la posición X donde la
+ * pieza cabe a la menor altura Y (menos avance de rollo = menos desperdicio),
+ * y entre varias a la misma altura, la que deja menos ancho sobrante.
+ */
+export function ubicarEnRollo(
+  pieza: PiezaRequerida,
+  rollo: RolloActivo,
+  skyline: SegmentoSkyline[]
+): { xInicial: number; yInicial: number; abreFranjaNueva: boolean; anchoLibreEnPosicion: number } | null {
+  if (pieza.anchoMm > rollo.anchoMm + EPS) return null;
+
+  const candidatosX = [...new Set(skyline.map((s) => s.xIni))].sort((a, b) => a - b);
+
+  let mejor: { xInicial: number; yInicial: number; anchoLibreEnPosicion: number } | null = null;
+  for (const xInicial of candidatosX) {
+    if (xInicial + pieza.anchoMm > rollo.anchoMm + EPS) continue;
+    const yInicial = alturaEnRango(skyline, xInicial, xInicial + pieza.anchoMm);
+    if (yInicial + pieza.largoMm > rollo.largoMm + EPS) continue;
+
+    const anchoLibreEnPosicion = anchoLibreContiguo(skyline, xInicial, yInicial, rollo.anchoMm);
+
+    if (
+      !mejor ||
+      yInicial < mejor.yInicial - EPS ||
+      (Math.abs(yInicial - mejor.yInicial) <= EPS && anchoLibreEnPosicion < mejor.anchoLibreEnPosicion)
+    ) {
+      mejor = { xInicial, yInicial, anchoLibreEnPosicion };
+    }
+  }
+
+  if (!mejor) return null;
+  return {
+    xInicial: mejor.xInicial,
+    yInicial: mejor.yInicial,
+    abreFranjaNueva: mejor.yInicial >= rollo.largoUsadoMm - EPS,
+    anchoLibreEnPosicion: mejor.anchoLibreEnPosicion,
+  };
 }
 
 /** Elige, entre los retales candidatos, el de menor desperdicio (best-fit). */
@@ -131,42 +206,6 @@ export function elegirMejorRetal(
     return desperdicioA - desperdicioB;
   });
   return candidatos[0];
-}
-
-/**
- * Ubica una pieza dentro de un rollo usando el algoritmo de franjas.
- * `franjas` debe venir de `reconstruirFranjas` sobre los cortes existentes
- * de ese rollo.
- */
-export function ubicarEnRollo(
-  pieza: PiezaRequerida,
-  rollo: RolloActivo,
-  franjas: Franja[]
-): { xInicial: number; yInicial: number; abreFranjaNueva: boolean } | null {
-  if (pieza.anchoMm > rollo.anchoMm + EPS) return null; // no cabe ni de ancho
-
-  // 1. Intentar encajar en una franja abierta con espacio suficiente,
-  //    priorizando la que deje menos ancho sobrante (best-fit).
-  const candidatas = franjas
-    .filter(
-      (f) =>
-        rollo.anchoMm - f.anchoUsado + EPS >= pieza.anchoMm &&
-        f.altoFranja + EPS >= pieza.largoMm
-    )
-    .sort(
-      (a, b) =>
-        rollo.anchoMm - b.anchoUsado - pieza.anchoMm - (rollo.anchoMm - a.anchoUsado - pieza.anchoMm)
-    );
-
-  if (candidatas.length > 0) {
-    const franja = candidatas[0];
-    return { xInicial: franja.anchoUsado, yInicial: franja.yInicial, abreFranjaNueva: false };
-  }
-
-  // 2. Ninguna franja sirve: abrir una nueva al final del rollo.
-  const yNueva = rollo.largoUsadoMm;
-  if (yNueva + pieza.largoMm > rollo.largoMm + EPS) return null; // no cabe de largo
-  return { xInicial: 0, yInicial: yNueva, abreFranjaNueva: true };
 }
 
 /** Una opción de corte candidata, para mostrar al usuario junto a las demás. */
@@ -235,20 +274,15 @@ export function listarCandidatos(
     .sort((a, b) => a.desperdicioMm2 - b.desperdicioMm2);
 
   const candidatosRollo: CandidatoCorte[] = [];
-  const rollosAptos = rollosActivos
-    .filter(
-      (r) =>
-        r.linea === pieza.linea &&
-        r.referencia === pieza.referencia &&
-        r.anchoMm + EPS >= pieza.anchoMm
-    )
-    .sort((a, b) => a.largoMm - a.largoUsadoMm - (b.largoMm - b.largoUsadoMm));
+  const rollosAptos = rollosActivos.filter(
+    (r) => r.linea === pieza.linea && r.referencia === pieza.referencia && r.anchoMm + EPS >= pieza.anchoMm
+  );
 
   for (const rollo of rollosAptos) {
-    const franjas = reconstruirFranjas(cortesPorRollo.get(rollo.lote) ?? []);
-    const ubicacion = ubicarEnRollo(pieza, rollo, franjas);
+    const skyline = construirSkyline(cortesPorRollo.get(rollo.lote) ?? [], rollo.anchoMm);
+    const ubicacion = ubicarEnRollo(pieza, rollo, skyline);
     if (ubicacion) {
-      const largoDisponible = rollo.largoMm - rollo.largoUsadoMm;
+      const largoDisponible = rollo.largoMm - ubicacion.yInicial;
       candidatosRollo.push({
         tipo: "rollo",
         rolloId: rollo.id,
@@ -260,7 +294,7 @@ export function listarCandidatos(
         xSugerido: ubicacion.xInicial,
         ySugerido: ubicacion.yInicial,
         abreFranjaNueva: ubicacion.abreFranjaNueva,
-        desperdicioMm2: rollo.anchoMm * largoDisponible - pieza.anchoMm * pieza.largoMm,
+        desperdicioMm2: ubicacion.anchoLibreEnPosicion * largoDisponible - pieza.anchoMm * pieza.largoMm,
         sugerido: false,
       });
     }
@@ -286,7 +320,29 @@ export function sugerirCorte(
   retalesDisponibles: RetalDisponible[],
   rollosActivos: RolloActivo[],
   cortesPorRollo: Map<string, { xInicial: number; yInicial: number; anchoMm: number; largoMm: number }[]>
-): SugerenciaCorte {
+):
+  | {
+      tipo: "retal";
+      retalId: number;
+      loteOrigen: string;
+      xInicial: 0;
+      yInicial: 0;
+      anchoMm: number;
+      largoMm: number;
+      sobranteAnchoMm: number;
+      sobranteLargoMm: number;
+    }
+  | {
+      tipo: "rollo";
+      rolloId: number;
+      lote: string;
+      xInicial: number;
+      yInicial: number;
+      anchoMm: number;
+      largoMm: number;
+      abreFranjaNueva: boolean;
+    }
+  | { tipo: "sin_material" } {
   const retal = elegirMejorRetal(pieza, retalesDisponibles);
   if (retal) {
     return {
@@ -302,20 +358,13 @@ export function sugerirCorte(
     };
   }
 
-  const candidatosRollo = rollosActivos
-    .filter(
-      (r) =>
-        r.linea === pieza.linea &&
-        r.referencia === pieza.referencia &&
-        r.anchoMm + EPS >= pieza.anchoMm
-    )
-    // Preferir el rollo con menos largo disponible que aún alcance (best-fit
-    // también a nivel de rollo, para ir agotando rollos abiertos primero).
-    .sort((a, b) => a.largoMm - a.largoUsadoMm - (b.largoMm - b.largoUsadoMm));
+  const rollosAptos = rollosActivos.filter(
+    (r) => r.linea === pieza.linea && r.referencia === pieza.referencia && r.anchoMm + EPS >= pieza.anchoMm
+  );
 
-  for (const rollo of candidatosRollo) {
-    const franjas = reconstruirFranjas(cortesPorRollo.get(rollo.lote) ?? []);
-    const ubicacion = ubicarEnRollo(pieza, rollo, franjas);
+  for (const rollo of rollosAptos) {
+    const skyline = construirSkyline(cortesPorRollo.get(rollo.lote) ?? [], rollo.anchoMm);
+    const ubicacion = ubicarEnRollo(pieza, rollo, skyline);
     if (ubicacion) {
       return {
         tipo: "rollo",

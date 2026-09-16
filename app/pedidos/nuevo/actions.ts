@@ -9,7 +9,7 @@ import {
   getCortesPorLote,
   getRolloPorLote,
 } from "@/lib/db/queries";
-import { listarCandidatos, type CandidatoCorte, type PiezaRequerida } from "@/lib/cutting-engine";
+import { listarCandidatos, construirSkyline, alturaEnRango, anchoLibreContiguo, type CandidatoCorte, type PiezaRequerida } from "@/lib/cutting-engine";
 import { requireSesion } from "@/lib/auth";
 
 /** Datos para dibujar el plano de corte de un rollo — ver components/plano-de-corte.tsx. */
@@ -32,6 +32,28 @@ export type PlanoRollo = {
 export type ResultadoBusqueda =
   | { ok: true; candidatos: CandidatoCorte[]; pieza: PiezaRequerida; planos: Record<string, PlanoRollo> }
   | { ok: false; error: string };
+
+/** Arma el plano de corte de un rollo tal como está guardado ahora mismo en la base de datos. */
+async function construirPlanoRollo(lote: string): Promise<PlanoRollo | null> {
+  const rollo = await getRolloPorLote(lote);
+  if (!rollo) return null;
+  const cs = await getCortesPorLote(lote);
+  return {
+    anchoMm: rollo.anchoMm,
+    largoMm: rollo.largoMm,
+    largoUsadoMm: rollo.largoUsadoMm,
+    cortes: cs.map((c) => ({
+      id: c.id,
+      xInicial: c.xInicial,
+      yInicial: c.yInicial,
+      anchoMm: c.anchoMm,
+      largoMm: c.largoMm,
+      estado: c.estado,
+      pedidoTaller: c.pedidoTaller,
+      cliente: c.cliente,
+    })),
+  };
+}
 
 /** Busca TODAS las opciones disponibles (retales y rollos) para una pieza — no solo la mejor. */
 export async function buscarDisponibilidad(input: {
@@ -64,38 +86,23 @@ export async function buscarDisponibilidad(input: {
     { xInicial: number; yInicial: number; anchoMm: number; largoMm: number }[]
   >();
 
-  async function cargarPlano(lote: string, rollo: { anchoMm: number; largoMm: number; largoUsadoMm: number }) {
+  async function cargarPlano(lote: string) {
     if (planos[lote]) return;
-    const cs = await getCortesPorLote(lote);
-    planos[lote] = {
-      anchoMm: rollo.anchoMm,
-      largoMm: rollo.largoMm,
-      largoUsadoMm: rollo.largoUsadoMm,
-      cortes: cs.map((c) => ({
-        id: c.id,
-        xInicial: c.xInicial,
-        yInicial: c.yInicial,
-        anchoMm: c.anchoMm,
-        largoMm: c.largoMm,
-        estado: c.estado,
-        pedidoTaller: c.pedidoTaller,
-        cliente: c.cliente,
-      })),
-    };
+    const plano = await construirPlanoRollo(lote);
+    if (!plano) return;
+    planos[lote] = plano;
     cortesPorRollo.set(
       lote,
-      cs.map((c) => ({ xInicial: c.xInicial, yInicial: c.yInicial, anchoMm: c.anchoMm, largoMm: c.largoMm }))
+      plano.cortes.map((c) => ({ xInicial: c.xInicial, yInicial: c.yInicial, anchoMm: c.anchoMm, largoMm: c.largoMm }))
     );
   }
 
   for (const r of rollosActivos) {
-    await cargarPlano(r.lote, r);
+    await cargarPlano(r.lote);
   }
   const lotesOrigenRetal = [...new Set(retalesDisponibles.map((r) => r.loteOrigen))];
   for (const lote of lotesOrigenRetal) {
-    if (planos[lote]) continue;
-    const rolloOrigen = await getRolloPorLote(lote);
-    if (rolloOrigen) await cargarPlano(lote, rolloOrigen);
+    await cargarPlano(lote);
   }
 
   const candidatos = listarCandidatos(pieza, retalesDisponibles, rollosActivos, cortesPorRollo);
@@ -128,7 +135,10 @@ export async function confirmarCorte(input: {
   operario: string;
   estado: EstadoHistorico;
   nota?: string;
-}): Promise<{ ok: true; lote: string; pedidoCodigo: string } | { ok: false; error: string }> {
+}): Promise<
+  | { ok: true; lote: string; pedidoCodigo: string; corteId: number; plano: PlanoRollo }
+  | { ok: false; error: string }
+> {
   await requireSesion();
   const { candidato, anchoMm, largoMm, xInicial, yInicial, operario, estado, nota } = input;
 
@@ -151,23 +161,26 @@ export async function confirmarCorte(input: {
       return { ok: false, error: `El corte no cabe en el retal (disponible: ${retal.anchoMm} x ${retal.largoMm} mm).` };
     }
 
-    await db.insert(cortes).values({
-      lote: retal.loteOrigen,
-      pedidoTaller: pedidoCodigo,
-      cliente: input.clienteNombre,
-      anchoMm,
-      largoMm,
-      areaMm2: anchoMm * largoMm,
-      estado,
-      operario,
-      xInicial,
-      yInicial,
-      origenTipo: "retal",
-      origenRetalId: retal.id,
-      nota: nota?.trim() || null,
-      linea: retal.linea,
-      referencia: retal.referencia,
-    });
+    const [{ id: corteId }] = await db
+      .insert(cortes)
+      .values({
+        lote: retal.loteOrigen,
+        pedidoTaller: pedidoCodigo,
+        cliente: input.clienteNombre,
+        anchoMm,
+        largoMm,
+        areaMm2: anchoMm * largoMm,
+        estado,
+        operario,
+        xInicial,
+        yInicial,
+        origenTipo: "retal",
+        origenRetalId: retal.id,
+        nota: nota?.trim() || null,
+        linea: retal.linea,
+        referencia: retal.referencia,
+      })
+      .returning({ id: cortes.id });
 
     await db.update(retales).set({ disponible: false }).where(eq(retales.id, retal.id));
 
@@ -195,35 +208,87 @@ export async function confirmarCorte(input: {
       });
     }
 
-    return { ok: true, lote: retal.loteOrigen, pedidoCodigo };
+    const plano = await construirPlanoRollo(retal.loteOrigen);
+    return { ok: true, lote: retal.loteOrigen, pedidoCodigo, corteId, plano: plano! };
   }
 
   // tipo === "rollo"
   const [rollo] = await db.select().from(rollos).where(eq(rollos.id, candidato.rolloId)).limit(1);
   if (!rollo) return { ok: false, error: "Ese rollo ya no existe." };
 
-  const largoDisponible = rollo.largoMm - rollo.largoUsadoMm;
-  if (anchoMm > rollo.anchoMm) return { ok: false, error: "El ancho de corte no puede superar el ancho del rollo." };
+  if (xInicial < -1e-6 || xInicial + anchoMm > rollo.anchoMm + 1e-6) {
+    return { ok: false, error: "El corte se sale del ancho del rollo en esa posición X." };
+  }
   if (yInicial + largoMm > rollo.largoMm + 1e-6) {
-    return { ok: false, error: `El rollo solo tiene ${largoDisponible} mm disponibles a lo largo desde Y=${yInicial}.` };
+    return { ok: false, error: `El rollo solo mide ${rollo.largoMm} mm de largo — no alcanza desde Y=${yInicial}.` };
   }
 
-  await db.insert(cortes).values({
-    lote: rollo.lote,
-    pedidoTaller: pedidoCodigo,
-    cliente: input.clienteNombre,
-    anchoMm,
-    largoMm,
-    areaMm2: anchoMm * largoMm,
-    estado,
-    operario,
-    xInicial,
-    yInicial,
-    origenTipo: "rollo",
-    nota: nota?.trim() || null,
-    linea: rollo.linea,
-    referencia: rollo.referencia,
-  });
+  // El plano puede haber sido editado a mano (X/Y), así que se valida contra
+  // el perfil real de alturas del rollo — no solo contra la sugerencia del
+  // motor — para no permitir un corte que se solape con material ya usado.
+  const cortesExistentes = await getCortesPorLote(rollo.lote);
+  const skylinePrevio = construirSkyline(cortesExistentes, rollo.anchoMm);
+  const alturaEnEsePunto = alturaEnRango(skylinePrevio, xInicial, xInicial + anchoMm);
+  if (alturaEnEsePunto > yInicial + 1e-6) {
+    return {
+      ok: false,
+      error: `Esa posición ya tiene material cortado hasta Y=${alturaEnEsePunto} mm — ajusta las coordenadas.`,
+    };
+  }
+
+  const [{ id: corteId }] = await db
+    .insert(cortes)
+    .values({
+      lote: rollo.lote,
+      pedidoTaller: pedidoCodigo,
+      cliente: input.clienteNombre,
+      anchoMm,
+      largoMm,
+      areaMm2: anchoMm * largoMm,
+      estado,
+      operario,
+      xInicial,
+      yInicial,
+      origenTipo: "rollo",
+      nota: nota?.trim() || null,
+      linea: rollo.linea,
+      referencia: rollo.referencia,
+    })
+    .returning({ id: cortes.id });
+
+  // Si el corte no usa todo el ancho libre disponible en esa posición, el
+  // sobrante lateral se separa físicamente como retal aprovechable (igual
+  // que con un retal usado como origen) — y se registra también como corte
+  // (RETAL_UTIL) en el plano del rollo para que quede marcado como ya
+  // consumido y no se vuelva a ofrecer como espacio libre del rollo.
+  const anchoLibreEnPosicion = anchoLibreContiguo(skylinePrevio, xInicial, yInicial, rollo.anchoMm);
+  const sobranteAncho = anchoLibreEnPosicion - anchoMm;
+  if (sobranteAncho >= MIN_UTIL_MM) {
+    await db.insert(retales).values({
+      loteOrigen: rollo.lote,
+      linea: rollo.linea,
+      referencia: rollo.referencia,
+      anchoMm: sobranteAncho,
+      largoMm,
+      disponible: true,
+    });
+    await db.insert(cortes).values({
+      lote: rollo.lote,
+      pedidoTaller: null,
+      cliente: null,
+      anchoMm: sobranteAncho,
+      largoMm,
+      areaMm2: sobranteAncho * largoMm,
+      estado: "RETAL_UTIL",
+      operario,
+      xInicial: xInicial + anchoMm,
+      yInicial,
+      origenTipo: "rollo",
+      nota: "Retal generado automáticamente por el sobrante lateral de este corte.",
+      linea: rollo.linea,
+      referencia: rollo.referencia,
+    });
+  }
 
   const nuevaFrontera = yInicial + largoMm;
   await db
@@ -234,19 +299,6 @@ export async function confirmarCorte(input: {
     })
     .where(eq(rollos.id, rollo.id));
 
-  // Si el corte no usa todo el ancho del rollo, el sobrante lateral queda
-  // como retal aprovechable (igual que con un retal usado como origen).
-  const sobranteAncho = rollo.anchoMm - anchoMm;
-  if (sobranteAncho >= MIN_UTIL_MM) {
-    await db.insert(retales).values({
-      loteOrigen: rollo.lote,
-      linea: rollo.linea,
-      referencia: rollo.referencia,
-      anchoMm: sobranteAncho,
-      largoMm,
-      disponible: true,
-    });
-  }
-
-  return { ok: true, lote: rollo.lote, pedidoCodigo };
+  const plano = await construirPlanoRollo(rollo.lote);
+  return { ok: true, lote: rollo.lote, pedidoCodigo, corteId, plano: plano! };
 }
