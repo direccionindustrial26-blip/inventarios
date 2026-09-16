@@ -1,8 +1,9 @@
 export const dynamic = "force-dynamic";
 
 import { notFound } from "next/navigation";
-import { getRolloPorLote, getCortesPorLote } from "@/lib/db/queries";
+import { getRolloPorLote, getCortesPorLote, getOperariosActivos } from "@/lib/db/queries";
 import { PlanoDeCorte } from "@/components/plano-de-corte";
+import { HistorialTabla } from "@/components/historial-tabla";
 import { requireUsuario } from "@/lib/auth";
 
 export default async function RolloDetallePage({
@@ -14,7 +15,7 @@ export default async function RolloDetallePage({
   const rollo = await getRolloPorLote(lote);
   if (!rollo) notFound();
 
-  const cortesDelRollo = await getCortesPorLote(lote);
+  const [cortesDelRollo, operarios] = await Promise.all([getCortesPorLote(lote), getOperariosActivos()]);
   const disponible = rollo.largoMm - rollo.largoUsadoMm;
 
   return (
@@ -52,47 +53,7 @@ export default async function RolloDetallePage({
         />
       </div>
 
-      <div className="overflow-x-auto card">
-        <table className="w-full min-w-[640px] text-sm">
-          <thead className="bg-neutral-50 text-left text-neutral-500">
-            <tr>
-              <th className="px-4 py-2 font-medium">Fecha</th>
-              <th className="px-4 py-2 font-medium">Pedido taller</th>
-              <th className="px-4 py-2 font-medium">Cliente</th>
-              <th className="px-4 py-2 font-medium">Ancho x Largo (mm)</th>
-              <th className="px-4 py-2 font-medium">X, Y</th>
-              <th className="px-4 py-2 font-medium">Estado</th>
-              <th className="px-4 py-2 font-medium">Operario</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-neutral-100">
-            {cortesDelRollo.map((c) => (
-              <tr key={c.id}>
-                <td className="px-4 py-2">
-                  {c.fecha ? new Date(c.fecha).toLocaleDateString("es-CO") : "—"}
-                </td>
-                <td className="px-4 py-2">{c.pedidoTaller ?? "—"}</td>
-                <td className="px-4 py-2">{c.cliente ?? "—"}</td>
-                <td className="px-4 py-2">
-                  {c.anchoMm.toLocaleString("es-CO")} x {c.largoMm.toLocaleString("es-CO")}
-                </td>
-                <td className="px-4 py-2">
-                  {c.xInicial.toLocaleString("es-CO")}, {c.yInicial.toLocaleString("es-CO")}
-                </td>
-                <td className="px-4 py-2">{c.estado}</td>
-                <td className="px-4 py-2">{c.operario ?? "—"}</td>
-              </tr>
-            ))}
-            {cortesDelRollo.length === 0 && (
-              <tr>
-                <td className="px-4 py-6 text-center text-neutral-400" colSpan={7}>
-                  Este rollo no tiene cortes registrados todavía.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <HistorialTabla cortes={cortesDelRollo} operarios={operarios.map((o) => o.nombre)} mostrarLote={false} />
     </div>
   );
 }

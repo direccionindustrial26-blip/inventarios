@@ -46,6 +46,12 @@ export const retales = pgTable("retales", {
   largoMm: doublePrecision("largo_mm").notNull(),
   disponible: boolean("disponible").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  // Si este retal salió como sobrante automático de un corte (ver
+  // confirmarCorte/insertarSobrante en app/pedidos/nuevo/actions.ts), el id
+  // de ese corte — permite revertir el corte (editarCorte/eliminarCorte en
+  // app/historial/actions.ts) sin dejar sobrantes huérfanos, y bloquear la
+  // reversión si el sobrante ya fue consumido por otro pedido.
+  origenCorteId: integer("origen_corte_id"),
 });
 
 /**
@@ -79,6 +85,10 @@ export const cortes = pgTable("cortes", {
   // backfill (scripts/backfill-linea-referencia.ts).
   linea: text("linea"),
   referencia: text("referencia"),
+  // Si esta fila es el sobrante lateral RETAL_UTIL que confirmarCorte genera
+  // automáticamente junto a un corte sobre rollo, el id de ese corte
+  // "padre" — mismo propósito que retales.origenCorteId, ver ahí.
+  generadoPorCorteId: integer("generado_por_corte_id"),
 });
 
 /**

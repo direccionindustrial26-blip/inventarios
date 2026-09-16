@@ -195,6 +195,7 @@ export async function confirmarCorte(input: {
         anchoMm: sobranteAncho,
         largoMm,
         disponible: true,
+        origenCorteId: corteId,
       });
     }
     if (sobranteLargo >= MIN_UTIL_MM) {
@@ -205,6 +206,7 @@ export async function confirmarCorte(input: {
         anchoMm,
         largoMm: sobranteLargo,
         disponible: true,
+        origenCorteId: corteId,
       });
     }
 
@@ -217,10 +219,13 @@ export async function confirmarCorte(input: {
   if (!rollo) return { ok: false, error: "Ese rollo ya no existe." };
 
   if (xInicial < -1e-6 || xInicial + anchoMm > rollo.anchoMm + 1e-6) {
-    return { ok: false, error: "El corte se sale del ancho del rollo en esa posición X." };
+    return {
+      ok: false,
+      error: `El ancho pedido (${anchoMm} mm) no alcanza en X=${xInicial} — el rollo mide ${rollo.anchoMm} mm de ancho, así que ahí solo caben ${Math.max(rollo.anchoMm - xInicial, 0)} mm.`,
+    };
   }
   if (yInicial + largoMm > rollo.largoMm + 1e-6) {
-    return { ok: false, error: `El rollo solo mide ${rollo.largoMm} mm de largo — no alcanza desde Y=${yInicial}.` };
+    return { ok: false, error: `El largo pedido (${largoMm} mm) no alcanza desde Y=${yInicial} — el rollo solo mide ${rollo.largoMm} mm de largo.` };
   }
 
   // El plano puede haber sido editado a mano (X/Y), así que se valida contra
@@ -230,9 +235,13 @@ export async function confirmarCorte(input: {
   const skylinePrevio = construirSkyline(cortesExistentes, rollo.anchoMm);
   const alturaEnEsePunto = alturaEnRango(skylinePrevio, xInicial, xInicial + anchoMm);
   if (alturaEnEsePunto > yInicial + 1e-6) {
+    const anchoLibreAqui = anchoLibreContiguo(skylinePrevio, xInicial, yInicial, rollo.anchoMm);
     return {
       ok: false,
-      error: `Esa posición ya tiene material cortado hasta Y=${alturaEnEsePunto} mm — ajusta las coordenadas.`,
+      error:
+        anchoLibreAqui + 1e-6 < anchoMm
+          ? `El ancho pedido (${anchoMm} mm) no alcanza en X=${xInicial} — ahí solo hay ${anchoLibreAqui} mm libres antes de material ya cortado (que llega hasta Y=${alturaEnEsePunto} mm). Ajusta el ancho, la posición X, o revisa si hay otra franja libre.`
+          : `Esa posición ya tiene material cortado hasta Y=${alturaEnEsePunto} mm — ajusta las coordenadas.`,
     };
   }
 
@@ -271,6 +280,7 @@ export async function confirmarCorte(input: {
       anchoMm: sobranteAncho,
       largoMm,
       disponible: true,
+      origenCorteId: corteId,
     });
     await db.insert(cortes).values({
       lote: rollo.lote,
@@ -287,6 +297,7 @@ export async function confirmarCorte(input: {
       nota: "Retal generado automáticamente por el sobrante lateral de este corte.",
       linea: rollo.linea,
       referencia: rollo.referencia,
+      generadoPorCorteId: corteId,
     });
   }
 

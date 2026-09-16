@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { buscarDisponibilidad, confirmarCorte, type EstadoHistorico, type PlanoRollo } from "@/app/pedidos/nuevo/actions";
-import type { CandidatoCorte, PiezaRequerida } from "@/lib/cutting-engine";
+import { construirSkyline, anchoLibreContiguo, type CandidatoCorte, type PiezaRequerida } from "@/lib/cutting-engine";
 import { PlanoDeCorte } from "@/components/plano-de-corte";
 
 type LineaReferencia = { linea: string; referencia: string };
@@ -124,6 +124,31 @@ export function NuevoPedidoForm({
   }
 
   const camposCompletos = !!clienteElegido && /^\d+$/.test(numeroPedido) && !!operario;
+
+  // Disponibilidad real en la posición X/Y que quedó en los campos editables
+  // ahora mismo — se recalcula con el mismo motor que usa el servidor
+  // (lib/cutting-engine.ts), a partir del plano ya cargado, para avisar
+  // ANTES de confirmar si el ancho/largo pedido no cabe ahí, en vez de que
+  // el usuario solo se entere por el mensaje de error del servidor (o, peor,
+  // reduzca el ancho a mano para que "pase" sin darse cuenta de que dejó
+  // material sin usar).
+  let disponibilidadAqui: { anchoLibre: number; largoLibre: number } | null = null;
+  if (seleccion?.tipo === "rollo") {
+    const plano = planos[loteDelPlano(seleccion)];
+    const x = Number(xFinal);
+    const y = Number(yFinal);
+    if (plano && Number.isFinite(x) && Number.isFinite(y)) {
+      const skyline = construirSkyline(plano.cortes, plano.anchoMm);
+      disponibilidadAqui = {
+        anchoLibre: anchoLibreContiguo(skyline, x, y, plano.anchoMm),
+        largoLibre: Math.max(plano.largoMm - y, 0),
+      };
+    }
+  }
+  const anchoPedidoNoCabe =
+    !!disponibilidadAqui && Number(anchoFinal) > 0 && Number(anchoFinal) > disponibilidadAqui.anchoLibre + 1e-6;
+  const largoPedidoNoCabe =
+    !!disponibilidadAqui && Number(largoFinal) > 0 && Number(largoFinal) > disponibilidadAqui.largoLibre + 1e-6;
 
   return (
     <div className="space-y-6">
@@ -260,6 +285,14 @@ export function NuevoPedidoForm({
                         <input className="input" type="number" value={yFinal} onChange={(e) => setYFinal(e.target.value)} />
                       </Field>
                     </div>
+                    {disponibilidadAqui && (
+                      <p className={`mt-2 text-xs ${anchoPedidoNoCabe || largoPedidoNoCabe ? "font-medium text-red-600" : "text-neutral-500"}`}>
+                        Disponible libre en X={xFinal || 0}, Y={yFinal || 0}: {disponibilidadAqui.anchoLibre.toLocaleString("es-CO")} mm de
+                        ancho x {disponibilidadAqui.largoLibre.toLocaleString("es-CO")} mm de largo.
+                        {anchoPedidoNoCabe && " El ancho pedido no alcanza ahí."}
+                        {largoPedidoNoCabe && " El largo pedido no alcanza ahí."}
+                      </p>
+                    )}
                   </div>
 
                   <div className="grid gap-4 sm:grid-cols-2">
